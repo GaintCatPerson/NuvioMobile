@@ -98,6 +98,9 @@ jobs:
         with:
           xcode-version: '16.0'
 
+      - name: Download iOS Platform SDK
+        run: xcodebuild -downloadPlatform iOS
+
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
