@@ -71,6 +71,19 @@ jobs:
           ref: ${{ needs.check-release.outputs.tag }}
           submodules: 'false'
 
+      - name: Patch Swift compiler syntax errors (trailing commas)
+        run: |
+          python3 -c "
+          filepath = 'iosApp/DownloadsWidgetExtension/DownloadsLiveActivityWidget.swift'
+          with open(filepath, 'r') as f:
+              code = f.read()
+          code = code.replace('endPoint: .bottomTrailing,', 'endPoint: .bottomTrailing')
+          code = code.replace('.stroke(Color.white.opacity(0.10), lineWidth: 1),', '.stroke(Color.white.opacity(0.10), lineWidth: 1)')
+          with open(filepath, 'w') as f:
+              f.write(code)
+          print('Successfully patched compiler syntax errors!')
+          "
+
       - name: Initialize MPVKit Submodule (with 3 retries)
         run: |
           for i in {1..3}; do
