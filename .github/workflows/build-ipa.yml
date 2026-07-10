@@ -52,7 +52,13 @@ jobs:
         with:
           repository: 'NuvioMedia/NuvioMobile'
           ref: ${{ env.TAG }}
-          submodules: 'recursive'
+          submodules: 'false'
+
+      - name: Initialize MPVKit Submodule
+        if: steps.get-tag.outputs.skip == 'false'
+        run: |
+          git submodule update --init MPVKit
+
 
       - name: Set up JDK 17
         if: steps.get-tag.outputs.skip == 'false'
