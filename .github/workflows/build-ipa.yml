@@ -1,0 +1,120 @@
+name: Automated Unsigned IPA Build
+
+on:
+  schedule:
+    - cron: '0 0 * * *' # Runs daily at midnight UTC
+  workflow_dispatch:
+    inputs:
+      tag_override:
+        description: 'Specific upstream tag to build (e.g., v0.2.21). If empty, the latest upstream release will be built.'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  check-and-build:
+    runs-on: macos-14
+    steps:
+      - name: Determine tag to build
+        id: get-tag
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ -n "${{ github.event.inputs.tag_override }}" ]; then
+            TAG="${{ github.event.inputs.tag_override }}"
+            echo "Using manually specified tag: $TAG"
+          else
+            # Fetch latest release tag from upstream repo
+            TAG=$(curl -s -H "Authorization: token $GITHUB_TOKEN" https://api.github.com/repos/NuvioMedia/NuvioMobile/releases/latest | jq -r .tag_name)
+            if [ -z "$TAG" ] || [ "$TAG" = "null" ]; then
+              echo "Failed to fetch latest release from upstream."
+              exit 1
+            fi
+            echo "Latest upstream release tag: $TAG"
+          fi
+          
+          echo "TAG=$TAG" >> $GITHUB_ENV
+          
+          # Check if this release already exists in the fork
+          if gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "Release $TAG already exists on the fork. Skipping."
+            echo "skip=true" >> $GITHUB_OUTPUT
+          else
+            echo "Release $TAG does not exist on the fork. Proceeding to build."
+            echo "skip=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Checkout upstream tag
+        if: steps.get-tag.outputs.skip == 'false'
+        uses: actions/checkout@v4
+        with:
+          repository: 'NuvioMedia/NuvioMobile'
+          ref: ${{ env.TAG }}
+          submodules: 'recursive'
+
+      - name: Set up JDK 17
+        if: steps.get-tag.outputs.skip == 'false'
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Gradle
+        if: steps.get-tag.outputs.skip == 'false'
+        uses: gradle/actions/setup-gradle@v3
+
+      - name: Configure environment variables for full build
+        if: steps.get-tag.outputs.skip == 'false'
+        run: |
+          echo "NUVIO_IOS_DISTRIBUTION=full" >> $GITHUB_ENV
+          touch local.properties
+
+      - name: Build Unsigned iOS App
+        if: steps.get-tag.outputs.skip == 'false'
+        run: |
+          xcodebuild -workspace iosApp/iosApp.xcodeproj/project.xcworkspace \
+                     -scheme iosApp \
+                     -configuration Release \
+                     -sdk iphoneos \
+                     -derivedDataPath build \
+                     clean build \
+                     CODE_SIGNING_ALLOWED=NO \
+                     CODE_SIGNING_REQUIRED=NO \
+                     CODE_SIGN_IDENTITY="" \
+                     CODE_SIGN_ENTITLEMENTS=""
+
+      - name: Package IPA
+        if: steps.get-tag.outputs.skip == 'false'
+        run: |
+          TAG_NAME="${{ env.TAG }}"
+          VERSION="${TAG_NAME#v}"
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          
+          mkdir -p Payload
+          cp -r build/Build/Products/Release-iphoneos/*.app Payload/
+          zip -r "${VERSION}-unsigned.ipa" Payload
+
+      - name: Create Release
+        if: steps.get-tag.outputs.skip == 'false'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cat << 'EOF' > release_notes.md
+          ### 📦 Nuvio Mobile Sideload Build (Version: ${{ env.VERSION }})
+
+          This is an automated, unsigned IPA build of Nuvio Mobile, compiled for sideloading (AltStore, SideStore, TrollStore, Signulous, etc.).
+
+          **Upstream Source:** Built based on https://github.com/NuvioMedia/NuvioMobile at release tag ${{ env.TAG }}.
+
+          **Limitations of this build:**
+          * **Cloud Features Disabled**: Since this build does not connect to the official private Supabase backend, cloud sync, online accounts, and cloud backup features do not work. The app operates in local/offline mode.
+
+          *All local features (local playback, setting up custom Stremio addons, and offline collections) work as expected.*
+          EOF
+
+          gh release create "${{ env.TAG }}" "${{ env.VERSION }}-unsigned.ipa" \
+            --repo "${{ github.repository }}" \
+            --title "${{ env.TAG }}" \
+            --notes-file release_notes.md
