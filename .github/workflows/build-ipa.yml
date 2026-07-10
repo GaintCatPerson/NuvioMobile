@@ -9,16 +9,25 @@ on:
         description: 'Specific upstream tag to build (e.g., v0.2.21). If empty, the latest upstream release will be built.'
         required: false
         type: string
+      force_build:
+        description: 'Force build and recreate the release even if it already exists on the fork.'
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
 
 jobs:
-  check-and-build:
-    runs-on: macos-15
+  check-release:
+    name: Check Upstream Release
+    runs-on: ubuntu-latest
+    outputs:
+      skip: ${{ steps.check.outputs.skip }}
+      tag: ${{ steps.check.outputs.tag }}
     steps:
-      - name: Determine tag to build
-        id: get-tag
+      - name: Check latest upstream release
+        id: check
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -26,8 +35,8 @@ jobs:
             TAG="${{ github.event.inputs.tag_override }}"
             echo "Using manually specified tag: $TAG"
           else
-            # Fetch latest release tag from upstream repo (with 5 retries)
-            TAG=$(curl --retry 5 --retry-connrefused --retry-delay 5 -s -H "Authorization: token $GITHUB_TOKEN" https://api.github.com/repos/NuvioMedia/NuvioMobile/releases/latest | jq -r .tag_name)
+            # Fetch latest release tag from upstream repo (using gh api with built-in auth and retries)
+            TAG=$(gh api repos/NuvioMedia/NuvioMobile/releases/latest --jq .tag_name)
             if [ -z "$TAG" ] || [ "$TAG" = "null" ]; then
               echo "Failed to fetch latest release from upstream."
               exit 1
@@ -35,10 +44,13 @@ jobs:
             echo "Latest upstream release tag: $TAG"
           fi
           
-          echo "TAG=$TAG" >> $GITHUB_ENV
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
           
           # Check if this release already exists in the fork
-          if gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+          if [ "${{ github.event.inputs.force_build }}" = "true" ]; then
+            echo "Force build is enabled. Proceeding to build."
+            echo "skip=false" >> $GITHUB_OUTPUT
+          elif gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
             echo "Release $TAG already exists on the fork. Skipping."
             echo "skip=true" >> $GITHUB_OUTPUT
           else
@@ -46,16 +58,20 @@ jobs:
             echo "skip=false" >> $GITHUB_OUTPUT
           fi
 
+  build-ipa:
+    name: Build and Package IPA
+    needs: check-release
+    if: needs.check-release.outputs.skip == 'false'
+    runs-on: macos-15
+    steps:
       - name: Checkout upstream tag
-        if: steps.get-tag.outputs.skip == 'false'
         uses: actions/checkout@v4
         with:
           repository: 'NuvioMedia/NuvioMobile'
-          ref: ${{ env.TAG }}
+          ref: ${{ needs.check-release.outputs.tag }}
           submodules: 'false'
 
       - name: Initialize MPVKit Submodule (with 3 retries)
-        if: steps.get-tag.outputs.skip == 'false'
         run: |
           for i in {1..3}; do
             echo "Attempt $i to initialize MPVKit..."
@@ -64,33 +80,27 @@ jobs:
           echo "Failed to initialize submodules after 3 attempts."
           exit 1
 
-
       - name: Set up Xcode 16
-        if: steps.get-tag.outputs.skip == 'false'
         uses: maxim-lobanov/setup-xcode@v1
         with:
           xcode-version: '16.0'
 
       - name: Set up JDK 17
-        if: steps.get-tag.outputs.skip == 'false'
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '17'
 
       - name: Setup Gradle
-        if: steps.get-tag.outputs.skip == 'false'
         uses: gradle/actions/setup-gradle@v3
         continue-on-error: true
 
       - name: Configure environment variables for full build
-        if: steps.get-tag.outputs.skip == 'false'
         run: |
           echo "NUVIO_IOS_DISTRIBUTION=full" >> $GITHUB_ENV
           touch local.properties
 
       - name: Build Unsigned iOS App
-        if: steps.get-tag.outputs.skip == 'false'
         run: |
           xcodebuild -workspace iosApp/iosApp.xcodeproj/project.xcworkspace \
                      -scheme iosApp \
@@ -100,13 +110,13 @@ jobs:
                      clean build \
                      CODE_SIGNING_ALLOWED=NO \
                      CODE_SIGNING_REQUIRED=NO \
+                     CODE_SIGN_STYLE=Manual \
                      CODE_SIGN_IDENTITY="" \
                      CODE_SIGN_ENTITLEMENTS=""
 
       - name: Package IPA
-        if: steps.get-tag.outputs.skip == 'false'
         run: |
-          TAG_NAME="${{ env.TAG }}"
+          TAG_NAME="${{ needs.check-release.outputs.tag }}"
           VERSION="${TAG_NAME#v}"
           echo "VERSION=$VERSION" >> $GITHUB_ENV
           
@@ -114,17 +124,32 @@ jobs:
           cp -r build/Build/Products/Release-iphoneos/*.app Payload/
           zip -r "${VERSION}-unsigned.ipa" Payload
 
+      - name: Upload IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ needs.check-release.outputs.tag }}-unsigned-ipa
+          path: "*.ipa"
+          if-no-files-found: error
+
       - name: Create Release
-        if: steps.get-tag.outputs.skip == 'false'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # Delete existing release if it exists and force_build is true
+          if [ "${{ github.event.inputs.force_build }}" = "true" ]; then
+            echo "Checking if release exists to delete for force build..."
+            if gh release view "${{ needs.check-release.outputs.tag }}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+              echo "Deleting release ${{ needs.check-release.outputs.tag }}..."
+              gh release delete "${{ needs.check-release.outputs.tag }}" --yes --repo "${{ github.repository }}"
+            fi
+          fi
+
           cat << 'EOF' > release_notes.md
           ### 📦 Nuvio Mobile Sideload Build (Version: ${{ env.VERSION }})
 
           This is an automated, unsigned IPA build of Nuvio Mobile, compiled for sideloading (AltStore, SideStore, TrollStore, Signulous, etc.).
 
-          **Upstream Source:** Built based on https://github.com/NuvioMedia/NuvioMobile at release tag ${{ env.TAG }}.
+          **Upstream Source:** Built based on https://github.com/NuvioMedia/NuvioMobile at release tag ${{ needs.check-release.outputs.tag }}.
 
           **Limitations of this build:**
           * **Cloud Features Disabled**: Since this build does not connect to the official private Supabase backend, cloud sync, online accounts, and cloud backup features do not work. The app operates in local/offline mode.
@@ -132,7 +157,7 @@ jobs:
           *All local features (local playback, setting up custom Stremio addons, and offline collections) work as expected.*
           EOF
 
-          gh release create "${{ env.TAG }}" "${{ env.VERSION }}-unsigned.ipa" \
+          gh release create "${{ needs.check-release.outputs.tag }}" "${{ env.VERSION }}-unsigned.ipa" \
             --repo "${{ github.repository }}" \
-            --title "${{ env.TAG }}" \
+            --title "${{ needs.check-release.outputs.tag }}" \
             --notes-file release_notes.md
