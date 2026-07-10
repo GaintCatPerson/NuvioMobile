@@ -26,8 +26,8 @@ jobs:
             TAG="${{ github.event.inputs.tag_override }}"
             echo "Using manually specified tag: $TAG"
           else
-            # Fetch latest release tag from upstream repo
-            TAG=$(curl -s -H "Authorization: token $GITHUB_TOKEN" https://api.github.com/repos/NuvioMedia/NuvioMobile/releases/latest | jq -r .tag_name)
+            # Fetch latest release tag from upstream repo (with 5 retries)
+            TAG=$(curl --retry 5 --retry-connrefused --retry-delay 5 -s -H "Authorization: token $GITHUB_TOKEN" https://api.github.com/repos/NuvioMedia/NuvioMobile/releases/latest | jq -r .tag_name)
             if [ -z "$TAG" ] || [ "$TAG" = "null" ]; then
               echo "Failed to fetch latest release from upstream."
               exit 1
@@ -54,10 +54,15 @@ jobs:
           ref: ${{ env.TAG }}
           submodules: 'false'
 
-      - name: Initialize MPVKit Submodule
+      - name: Initialize MPVKit Submodule (with 3 retries)
         if: steps.get-tag.outputs.skip == 'false'
         run: |
-          git submodule update --init MPVKit
+          for i in {1..3}; do
+            echo "Attempt $i to initialize MPVKit..."
+            git submodule update --init MPVKit && exit 0 || sleep 15
+          done
+          echo "Failed to initialize submodules after 3 attempts."
+          exit 1
 
 
       - name: Set up JDK 17
@@ -70,6 +75,7 @@ jobs:
       - name: Setup Gradle
         if: steps.get-tag.outputs.skip == 'false'
         uses: gradle/actions/setup-gradle@v3
+        continue-on-error: true
 
       - name: Configure environment variables for full build
         if: steps.get-tag.outputs.skip == 'false'
