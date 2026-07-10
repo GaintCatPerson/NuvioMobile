@@ -106,6 +106,7 @@ jobs:
                      -scheme iosApp \
                      -configuration Release \
                      -sdk iphoneos \
+                     -destination "generic/platform=iOS" \
                      -derivedDataPath build \
                      clean build \
                      CODE_SIGNING_ALLOWED=NO \
