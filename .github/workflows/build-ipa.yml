@@ -43,9 +43,9 @@ jobs:
             fi
             echo "Latest upstream release tag: $TAG"
           fi
-          
+
           echo "tag=$TAG" >> $GITHUB_OUTPUT
-          
+
           # Check if this release already exists in the fork
           if [ "${{ github.event.inputs.force_build }}" = "true" ]; then
             echo "Force build is enabled. Proceeding to build."
@@ -71,54 +71,130 @@ jobs:
           ref: ${{ needs.check-release.outputs.tag }}
           submodules: 'false'
 
-      - name: Patch Swift compiler syntax errors & deployment target & Kotlin settings compiler error
+      - name: Patch compiler errors, deployment target & Kotlin Composable issue
         run: |
-          python3 -c "
           # 1. Patch trailing commas in Widget Swift file
-          filepath = 'iosApp/DownloadsWidgetExtension/DownloadsLiveActivityWidget.swift'
-          with open(filepath, 'r') as f:
-              code = f.read()
-          code = code.replace('endPoint: .bottomTrailing,', 'endPoint: .bottomTrailing')
-          code = code.replace('.stroke(Color.white.opacity(0.10), lineWidth: 1),', '.stroke(Color.white.opacity(0.10), lineWidth: 1)')
-          with open(filepath, 'w') as f:
-              f.write(code)
-          print('Successfully patched compiler syntax errors!')
+          sed -i '' 's/endPoint: .bottomTrailing,/endPoint: .bottomTrailing/' \
+            iosApp/DownloadsWidgetExtension/DownloadsLiveActivityWidget.swift
+          sed -i '' 's/.stroke(Color.white.opacity(0.10), lineWidth: 1),/.stroke(Color.white.opacity(0.10), lineWidth: 1)/' \
+            iosApp/DownloadsWidgetExtension/DownloadsLiveActivityWidget.swift
+          echo "Patched Swift trailing commas"
 
-          # 2. Patch Deployment Target to iOS 18.0 to resolve UIViewLayoutRegion linker error
-          pbxproj = 'iosApp/iosApp.xcodeproj/project.pbxproj'
-          with open(pbxproj, 'r') as f:
-              proj = f.read()
-          proj = proj.replace('IPHONEOS_DEPLOYMENT_TARGET = 16.1;', 'IPHONEOS_DEPLOYMENT_TARGET = 18.0;')
-          with open(pbxproj, 'w') as f:
-              f.write(proj)
-          print('Successfully bumped deployment target to iOS 18.0!')
+          # 2. Patch Deployment Target to iOS 18.0
+          sed -i '' 's/IPHONEOS_DEPLOYMENT_TARGET = 16.1;/IPHONEOS_DEPLOYMENT_TARGET = 18.0;/' \
+            iosApp/iosApp.xcodeproj/project.pbxproj
+          echo "Patched deployment target to iOS 18.0"
 
-          # 3. Patch Kotlin StreamsSettingsPage.kt to avoid inline Composable compilation bugs
-          settings_path = 'composeApp/src/commonMain/kotlin/com/nuvio/app/features/settings/StreamsSettingsPage.kt'
-          with open(settings_path, 'r') as f:
+          # 3. Write the clean replacement Kotlin function to a temp file.
+          #    Every line in the heredoc is indented 10 spaces (matching the YAML
+          #    block scalar); sed strips those 10 spaces so the Kotlin indentation
+          #    is preserved exactly.
+          cat << 'KOTLINEOF' | sed 's/^          //' > /tmp/streams_replacement.kt
+          internal fun LazyListScope.streamsSettingsContent(isTablet: Boolean) {
+              item {
+                  StreamsSettingsContentItem(isTablet = isTablet)
+              }
+          }
+
+          @Composable
+          private fun StreamsSettingsContentItem(isTablet: Boolean) {
+              val currentSettings by remember {
+                  StreamBadgeSettingsRepository.ensureLoaded()
+                  StreamBadgeSettingsRepository.uiState
+              }.collectAsStateWithLifecycle()
+              val currentRules = currentSettings.rules
+              var showBadgeImportDialog by rememberSaveable { mutableStateOf(false) }
+              var showBadgePositionDialog by rememberSaveable { mutableStateOf(false) }
+              val badgePlacementLabel = streamBadgePlacementLabel(currentSettings.badgePlacement)
+              Column {
+                  SettingsSection(
+                      title = stringResource(Res.string.settings_stream_badges_section),
+                      isTablet = isTablet,
+                  ) {
+                      SettingsGroup(isTablet = isTablet) {
+                          SettingsSwitchRow(
+                              title = stringResource(Res.string.settings_stream_size_badges_title),
+                              description = stringResource(Res.string.settings_stream_size_badges_description),
+                              checked = currentSettings.showFileSizeBadges,
+                              isTablet = isTablet,
+                              onCheckedChange = StreamBadgeSettingsRepository::setShowFileSizeBadges,
+                          )
+                          SettingsNavigationRow(
+                              title = stringResource(Res.string.settings_stream_badge_position_title),
+                              description = badgePlacementLabel,
+                              isTablet = isTablet,
+                              onClick = { showBadgePositionDialog = true },
+                          )
+                          SettingsNavigationRow(
+                              title = stringResource(Res.string.settings_stream_badge_urls_title),
+                              description = badgeRulesPreview(currentRules),
+                              isTablet = isTablet,
+                              onClick = { showBadgeImportDialog = true },
+                          )
+                      }
+                  }
+
+                  SettingsSection(
+                      title = stringResource(Res.string.settings_stream_display_section),
+                      isTablet = isTablet,
+                  ) {
+                      SettingsGroup(isTablet = isTablet) {
+                          SettingsSwitchRow(
+                              title = stringResource(Res.string.settings_stream_addon_logo_title),
+                              description = stringResource(Res.string.settings_stream_addon_logo_description),
+                              checked = currentSettings.showAddonLogo,
+                              isTablet = isTablet,
+                              onCheckedChange = StreamBadgeSettingsRepository::setShowAddonLogo,
+                          )
+                      }
+                  }
+
+                  if (showBadgeImportDialog) {
+                      BadgeUrlManagerDialog(
+                          currentRules = currentRules,
+                          onDismiss = { showBadgeImportDialog = false },
+                      )
+                  }
+
+                  if (showBadgePositionDialog) {
+                      StreamBadgePositionDialog(
+                          selectedPlacement = currentSettings.badgePlacement,
+                          onPlacementSelected = { placement ->
+                              StreamBadgeSettingsRepository.setBadgePlacement(placement)
+                              showBadgePositionDialog = false
+                          },
+                          onDismiss = { showBadgePositionDialog = false },
+                      )
+                  }
+              }
+          }
+          KOTLINEOF
+
+          # 4. Replace the entire broken streamsSettingsContent function in the
+          #    upstream Kotlin file with the clean version from the temp file.
+          #    Uses regex to match from the function signature to the closing
+          #    brace right before streamBadgePlacementLabel.
+          python3 -c "
+          import re
+          path = 'composeApp/src/commonMain/kotlin/com/nuvio/app/features/settings/StreamsSettingsPage.kt'
+          with open(path, 'r') as f:
               kcode = f.read()
-          target_sig = 'internal fun LazyListScope.streamsSettingsContent(isTablet: Boolean) {\n    item {'
-          replacement_sig = 'internal fun LazyListScope.streamsSettingsContent(isTablet: Boolean) {\n    item {\n        StreamsSettingsContentItem(isTablet = isTablet)\n    }\n}\n\n@Composable\nprivate fun StreamsSettingsContentItem(isTablet: Boolean) {'
-          target_col = 'val badgePlacementLabel = streamBadgePlacementLabel(currentSettings.badgePlacement)'
-          replacement_col = 'val badgePlacementLabel = streamBadgePlacementLabel(currentSettings.badgePlacement)\n    Column {'
-          if target_sig in kcode:
-              kcode = kcode.replace(target_sig, replacement_sig)
-              kcode = kcode.replace(target_col, replacement_col)
-              with open(settings_path, 'w') as f:
-                  f.write(kcode)
-              print('Successfully patched Kotlin compiler errors in StreamsSettingsPage!')
+          if 'StreamsSettingsContentItem' in kcode:
+              print('StreamsSettingsPage.kt already patched, skipping.')
           else:
-              target_sig_w = target_sig.replace('\n', '\r\n')
-              replacement_sig_w = replacement_sig.replace('\n', '\r\n')
-              replacement_col_w = 'val badgePlacementLabel = streamBadgePlacementLabel(currentSettings.badgePlacement)\r\n    Column {'
-              if target_sig_w in kcode:
-                  kcode = kcode.replace(target_sig_w, replacement_sig_w)
-                  kcode = kcode.replace(target_col, replacement_col_w)
-                  with open(settings_path, 'w') as f:
-                      f.write(kcode)
-                  print('Successfully patched Kotlin compiler errors in StreamsSettingsPage (Windows endings)!')
+              with open('/tmp/streams_replacement.kt', 'r') as f:
+                  replacement = f.read().rstrip()
+              pattern = re.compile(
+                  r'internal fun LazyListScope\.streamsSettingsContent\(isTablet: Boolean\) \{.*?\n\}\s*(?=@Composable\s*\nprivate fun streamBadgePlacementLabel)',
+                  re.DOTALL,
+              )
+              new_kcode, count = pattern.subn(replacement, kcode)
+              if count > 0:
+                  with open(path, 'w') as f:
+                      f.write(new_kcode)
+                  print(f'Patched StreamsSettingsPage.kt ({count} replacement).')
               else:
-                  print('Warning: Target code signature not found in StreamsSettingsPage!')
+                  print('WARNING: streamsSettingsContent function not found — file may have changed upstream.')
           "
 
       - name: Initialize MPVKit Submodule (with 3 retries)
@@ -175,7 +251,7 @@ jobs:
           TAG_NAME="${{ needs.check-release.outputs.tag }}"
           VERSION="${TAG_NAME#v}"
           echo "VERSION=$VERSION" >> $GITHUB_ENV
-          
+
           mkdir -p Payload
           cp -r build/Build/Products/Release-iphoneos/*.app Payload/
           zip -r "${VERSION}-unsigned.ipa" Payload
