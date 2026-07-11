@@ -71,10 +71,10 @@ jobs:
           ref: ${{ needs.check-release.outputs.tag }}
           submodules: 'false'
 
-      - name: Patch Swift compiler syntax errors & deployment target
+      - name: Patch Swift compiler syntax errors & deployment target & Kotlin settings compiler error
         run: |
           python3 -c "
-          # 1. Patch trailing commas
+          # 1. Patch trailing commas in Widget Swift file
           filepath = 'iosApp/DownloadsWidgetExtension/DownloadsLiveActivityWidget.swift'
           with open(filepath, 'r') as f:
               code = f.read()
@@ -92,6 +92,33 @@ jobs:
           with open(pbxproj, 'w') as f:
               f.write(proj)
           print('Successfully bumped deployment target to iOS 18.0!')
+
+          # 3. Patch Kotlin StreamsSettingsPage.kt to avoid inline Composable compilation bugs
+          settings_path = 'composeApp/src/commonMain/kotlin/com/nuvio/app/features/settings/StreamsSettingsPage.kt'
+          with open(settings_path, 'r') as f:
+              kcode = f.read()
+          target_sig = 'internal fun LazyListScope.streamsSettingsContent(isTablet: Boolean) {\n    item {'
+          replacement_sig = 'internal fun LazyListScope.streamsSettingsContent(isTablet: Boolean) {\n    item {\n        StreamsSettingsContentItem(isTablet = isTablet)\n    }\n}\n\n@Composable\nprivate fun StreamsSettingsContentItem(isTablet: Boolean) {'
+          target_col = 'val badgePlacementLabel = streamBadgePlacementLabel(currentSettings.badgePlacement)'
+          replacement_col = 'val badgePlacementLabel = streamBadgePlacementLabel(currentSettings.badgePlacement)\n    Column {'
+          if target_sig in kcode:
+              kcode = kcode.replace(target_sig, replacement_sig)
+              kcode = kcode.replace(target_col, replacement_col)
+              with open(settings_path, 'w') as f:
+                  f.write(kcode)
+              print('Successfully patched Kotlin compiler errors in StreamsSettingsPage!')
+          else:
+              target_sig_w = target_sig.replace('\n', '\r\n')
+              replacement_sig_w = replacement_sig.replace('\n', '\r\n')
+              replacement_col_w = 'val badgePlacementLabel = streamBadgePlacementLabel(currentSettings.badgePlacement)\r\n    Column {'
+              if target_sig_w in kcode:
+                  kcode = kcode.replace(target_sig_w, replacement_sig_w)
+                  kcode = kcode.replace(target_col, replacement_col_w)
+                  with open(settings_path, 'w') as f:
+                      f.write(kcode)
+                  print('Successfully patched Kotlin compiler errors in StreamsSettingsPage (Windows endings)!')
+              else:
+                  print('Warning: Target code signature not found in StreamsSettingsPage!')
           "
 
       - name: Initialize MPVKit Submodule (with 3 retries)

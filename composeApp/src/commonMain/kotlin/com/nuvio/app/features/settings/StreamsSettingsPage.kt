@@ -93,6 +93,12 @@ import org.jetbrains.compose.resources.stringResource
 
 internal fun LazyListScope.streamsSettingsContent(isTablet: Boolean) {
     item {
+        StreamsSettingsContentItem(isTablet = isTablet)
+    }
+}
+
+@Composable
+private fun StreamsSettingsContentItem(isTablet: Boolean) {
         val currentSettings by remember {
             StreamBadgeSettingsRepository.ensureLoaded()
             StreamBadgeSettingsRepository.uiState
@@ -101,6 +107,7 @@ internal fun LazyListScope.streamsSettingsContent(isTablet: Boolean) {
         var showBadgeImportDialog by rememberSaveable { mutableStateOf(false) }
         var showBadgePositionDialog by rememberSaveable { mutableStateOf(false) }
         val badgePlacementLabel = streamBadgePlacementLabel(currentSettings.badgePlacement)
+    Column {
 
         SettingsSection(
             title = stringResource(Res.string.settings_stream_badges_section),
