@@ -71,9 +71,10 @@ jobs:
           ref: ${{ needs.check-release.outputs.tag }}
           submodules: 'false'
 
-      - name: Patch Swift compiler syntax errors (trailing commas)
+      - name: Patch Swift compiler syntax errors & deployment target
         run: |
           python3 -c "
+          # 1. Patch trailing commas
           filepath = 'iosApp/DownloadsWidgetExtension/DownloadsLiveActivityWidget.swift'
           with open(filepath, 'r') as f:
               code = f.read()
@@ -82,6 +83,15 @@ jobs:
           with open(filepath, 'w') as f:
               f.write(code)
           print('Successfully patched compiler syntax errors!')
+
+          # 2. Patch Deployment Target to iOS 18.0 to resolve UIViewLayoutRegion linker error
+          pbxproj = 'iosApp/iosApp.xcodeproj/project.pbxproj'
+          with open(pbxproj, 'r') as f:
+              proj = f.read()
+          proj = proj.replace('IPHONEOS_DEPLOYMENT_TARGET = 16.1;', 'IPHONEOS_DEPLOYMENT_TARGET = 18.0;')
+          with open(pbxproj, 'w') as f:
+              f.write(proj)
+          print('Successfully bumped deployment target to iOS 18.0!')
           "
 
       - name: Initialize MPVKit Submodule (with 3 retries)
@@ -99,7 +109,9 @@ jobs:
           xcode-version: '16.0'
 
       - name: Download iOS Platform SDK
-        run: xcodebuild -downloadPlatform iOS
+        run: |
+          xcrun simctl list > /dev/null
+          xcodebuild -downloadPlatform iOS
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
