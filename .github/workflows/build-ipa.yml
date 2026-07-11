@@ -71,21 +71,9 @@ jobs:
           ref: ${{ needs.check-release.outputs.tag }}
           submodules: 'false'
 
-      - name: Patch compiler errors, deployment target & Kotlin Composable issue
+      - name: Patch Kotlin Composable issue
         run: |
-          # 1. Patch trailing commas in Widget Swift file
-          sed -i '' 's/endPoint: .bottomTrailing,/endPoint: .bottomTrailing/' \
-            iosApp/DownloadsWidgetExtension/DownloadsLiveActivityWidget.swift
-          sed -i '' 's/.stroke(Color.white.opacity(0.10), lineWidth: 1),/.stroke(Color.white.opacity(0.10), lineWidth: 1)/' \
-            iosApp/DownloadsWidgetExtension/DownloadsLiveActivityWidget.swift
-          echo "Patched Swift trailing commas"
-
-          # 2. Patch Deployment Target to iOS 18.0
-          sed -i '' 's/IPHONEOS_DEPLOYMENT_TARGET = 16.1;/IPHONEOS_DEPLOYMENT_TARGET = 18.0;/' \
-            iosApp/iosApp.xcodeproj/project.pbxproj
-          echo "Patched deployment target to iOS 18.0"
-
-          # 3. Write the clean replacement Kotlin function to a temp file.
+          # 1. Write the clean replacement Kotlin function to a temp file.
           #    Every line in the heredoc is indented 10 spaces (matching the YAML
           #    block scalar); sed strips those 10 spaces so the Kotlin indentation
           #    is preserved exactly.
@@ -206,10 +194,10 @@ jobs:
           echo "Failed to initialize submodules after 3 attempts."
           exit 1
 
-      - name: Set up Xcode 16
+      - name: Set up Xcode 26.3
         uses: maxim-lobanov/setup-xcode@v1
         with:
-          xcode-version: '16.0'
+          xcode-version: '26.3'
 
       - name: Download iOS Platform SDK
         run: |
