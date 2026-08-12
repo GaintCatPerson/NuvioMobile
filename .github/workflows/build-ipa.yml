@@ -14,9 +14,14 @@ on:
         required: false
         default: false
         type: boolean
+      engine_override:
+        description: 'Pin a specific Nuvio Engine version (e.g. v0.1.1) instead of auto-deriving it from the bundled Android AAR. Use when upstream ships a bad engine or you need to hold one.'
+        required: false
+        type: string
 
 permissions:
   contents: write
+  issues: write
 
 jobs:
   check-release:
@@ -196,26 +201,62 @@ jobs:
 
       - name: Fetch prebuilt Nuvio Engine XCFramework (full build)
         env:
-          NUVIO_ENGINE_VERSION: 'v0.1.1'
+          # Last-known-good fallback. Auto-derivation should normally override this, but if the
+          # upstream libs/ listing is unreachable or changes shape, we degrade to this pinned value
+          # instead of breaking the build silently.
+          NUVIO_ENGINE_VERSION_FALLBACK: 'v0.1.1'
+          UPSTREAM_TAG: ${{ needs.check-release.outputs.tag }}
         run: |
           set -euo pipefail
           # NUVIO_IOS_DISTRIBUTION=full links the native Nuvio Engine (a C++/libtorrent
           # torrent-streaming core). Upstream ships prebuilt Apple XCFrameworks per release;
           # the app expects it at <repo>/../nuvio-engine/platform/apple/NuvioEngine.xcframework.
-          # Version must match the engine bundled for Android (composeApp/libs/lib-nuvio-engine-*.aar).
+          #
+          # The engine version is coupled upstream ONLY via the Android AAR bundled at
+          # composeApp/libs/lib-nuvio-engine-android-<ver>.aar (there is no version ref in
+          # build.gradle.kts). To avoid a manual edit every time upstream bumps the engine,
+          # we derive the version from that AAR at the tag being built, falling back to the
+          # pinned value above if the lookup fails. Manual override via the engine_override input.
+          ENGINE_VERSION="${{ github.event.inputs.engine_override }}"
+          if [ -z "$ENGINE_VERSION" ]; then
+            echo "Deriving Nuvio Engine version from upstream composeApp/libs at tag $UPSTREAM_TAG..."
+            AAR=$(gh api "repos/NuvioMedia/NuvioMobile/contents/composeApp/libs?ref=$UPSTREAM_TAG" \
+                    --jq '.[] | select(.name | test("lib-nuvio-engine-android-.*\\.aar")) | .name' 2>/dev/null \
+                  | head -n1 || true)
+            if [ -n "$AAR" ]; then
+              DERIVED=$(echo "$AAR" | sed -E 's/^lib-nuvio-engine-android-(.+)\.aar$/v\1/')
+              if [[ "$DERIVED" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                ENGINE_VERSION="$DERIVED"
+                echo "Derived engine version: $ENGINE_VERSION (from $AAR)"
+              else
+                echo "WARNING: could not parse version from '$AAR'; using fallback."
+              fi
+            else
+              echo "WARNING: no bundled engine AAR found at tag $UPSTREAM_TAG; using fallback."
+            fi
+          fi
+          if [ -z "$ENGINE_VERSION" ]; then
+            ENGINE_VERSION="$NUVIO_ENGINE_VERSION_FALLBACK"
+            echo "Using fallback engine version: $ENGINE_VERSION"
+          fi
+          echo "NUVIO_ENGINE_VERSION=$ENGINE_VERSION" >> "$GITHUB_ENV"
+
           WORKSPACE_PARENT="${{ github.workspace }}/.."
           ENGINE_DIR="$WORKSPACE_PARENT/nuvio-engine"
           TARGET_DIR="$ENGINE_DIR/platform/apple"
-          ZIP_NAME="nuvio-engine-apple-${NUVIO_ENGINE_VERSION#v}.zip"
+          ZIP_NAME="nuvio-engine-apple-${ENGINE_VERSION#v}.zip"
+          ZIP_URL="https://github.com/NuvioMedia/nuvio-engine/releases/download/${ENGINE_VERSION}/${ZIP_NAME}"
 
-          echo "Fetching Nuvio Engine Apple XCFramework $NUVIO_ENGINE_VERSION..."
-          curl -fSL -o "/tmp/$ZIP_NAME" \
-            "https://github.com/NuvioMedia/nuvio-engine/releases/download/${NUVIO_ENGINE_VERSION}/${ZIP_NAME}"
+          echo "Fetching Nuvio Engine Apple XCFramework $ENGINE_VERSION..."
+          rm -f "/tmp/$ZIP_NAME"
+          # Retry transient network blips; fail fast on a real 404 (missing asset).
+          curl -fSL --retry 5 --retry-all-errors --retry-delay 10 --max-time 600 \
+            -o "/tmp/$ZIP_NAME" "$ZIP_URL"
 
           rm -rf "$ENGINE_DIR" "/tmp/nuvio-engine-extract"
           mkdir -p "$TARGET_DIR"
           unzip -q "/tmp/$ZIP_NAME" -d "/tmp/nuvio-engine-extract"
-          mv "/tmp/nuvio-engine-extract/nuvio-engine-apple-${NUVIO_ENGINE_VERSION#v}/NuvioEngine.xcframework" "$TARGET_DIR/"
+          mv "/tmp/nuvio-engine-extract/nuvio-engine-apple-${ENGINE_VERSION#v}/NuvioEngine.xcframework" "$TARGET_DIR/"
 
           if [ ! -f "$TARGET_DIR/NuvioEngine.xcframework/ios-arm64/libCNuvioEngine.a" ]; then
             echo "ERROR: libCNuvioEngine.a (ios-arm64) missing after extraction."
@@ -310,3 +351,45 @@ jobs:
             --repo "${{ github.repository }}" \
             --title "${{ needs.check-release.outputs.tag }}" \
             --notes-file release_notes.md
+
+  notify-failure:
+    name: Notify on Build Failure
+    needs: build-ipa
+    if: failure() && needs.build-ipa.result == 'failure'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Open or update failure issue
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          REPO="${{ github.repository }}"
+          RUN_URL="${{ github.server_url }}/$REPO/actions/runs/${{ github.run_id }}"
+          TAG="${{ needs.check-release.outputs.tag }}"
+          TITLE="🚨 Automated IPA build is failing"
+          MARKER="<!-- ipa-build-failure -->"
+          BODY="$MARKER
+          The **Automated Unsigned IPA Build** failed.
+
+          - **Upstream tag attempted:** \`$TAG\`
+          - **Run:** $RUN_URL
+          - **Triggered by:** ${{ github.event_name }}
+
+          Open the run log for the failing step. Common causes: upstream changed the Nuvio Engine
+          coupling (auto-derivation falls back to a pinned version), the engine release asset is not
+          yet published for a brand-new upstream tag, or a transient infra blip. Fix and re-run, or
+          set \`engine_override\` if a specific engine version must be held."
+
+          # Find an existing open issue with the marker; update it, else create one.
+          EXISTING=$(gh issue list --repo "$REPO" --state open --label ci \
+            --json number,body --jq ".[] | select(.body | contains(\"$MARKER\")) | .number" 2>/dev/null | head -n1 || true)
+          if [ -n "$EXISTING" ]; then
+            echo "Updating existing failure issue #$EXISTING"
+            gh issue edit "$EXISTING" --repo "$REPO" --title "$TITLE" --body "$BODY" 2>/dev/null || true
+            gh issue comment "$EXISTING" --repo "$REPO" --body "Still failing — latest run: $RUN_URL" 2>/dev/null || true
+          else
+            echo "Creating failure issue"
+            gh issue create --repo "$REPO" --title "$TITLE" --body "$BODY" --label "ci" 2>/dev/null || true
+          fi
