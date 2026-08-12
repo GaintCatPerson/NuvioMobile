@@ -194,6 +194,35 @@ jobs:
           echo "Failed to initialize submodules after 3 attempts."
           exit 1
 
+      - name: Fetch prebuilt Nuvio Engine XCFramework (full build)
+        env:
+          NUVIO_ENGINE_VERSION: 'v0.1.1'
+        run: |
+          set -euo pipefail
+          # NUVIO_IOS_DISTRIBUTION=full links the native Nuvio Engine (a C++/libtorrent
+          # torrent-streaming core). Upstream ships prebuilt Apple XCFrameworks per release;
+          # the app expects it at <repo>/../nuvio-engine/platform/apple/NuvioEngine.xcframework.
+          # Version must match the engine bundled for Android (composeApp/libs/lib-nuvio-engine-*.aar).
+          WORKSPACE_PARENT="${{ github.workspace }}/.."
+          ENGINE_DIR="$WORKSPACE_PARENT/nuvio-engine"
+          TARGET_DIR="$ENGINE_DIR/platform/apple"
+          ZIP_NAME="nuvio-engine-apple-${NUVIO_ENGINE_VERSION#v}.zip"
+
+          echo "Fetching Nuvio Engine Apple XCFramework $NUVIO_ENGINE_VERSION..."
+          curl -fSL -o "/tmp/$ZIP_NAME" \
+            "https://github.com/NuvioMedia/nuvio-engine/releases/download/${NUVIO_ENGINE_VERSION}/${ZIP_NAME}"
+
+          rm -rf "$ENGINE_DIR" "/tmp/nuvio-engine-extract"
+          mkdir -p "$TARGET_DIR"
+          unzip -q "/tmp/$ZIP_NAME" -d "/tmp/nuvio-engine-extract"
+          mv "/tmp/nuvio-engine-extract/nuvio-engine-apple-${NUVIO_ENGINE_VERSION#v}/NuvioEngine.xcframework" "$TARGET_DIR/"
+
+          if [ ! -f "$TARGET_DIR/NuvioEngine.xcframework/ios-arm64/libCNuvioEngine.a" ]; then
+            echo "ERROR: libCNuvioEngine.a (ios-arm64) missing after extraction."
+            exit 1
+          fi
+          echo "Nuvio Engine XCFramework ready at $TARGET_DIR/NuvioEngine.xcframework"
+
       - name: Set up Xcode 26.3
         uses: maxim-lobanov/setup-xcode@v1
         with:
