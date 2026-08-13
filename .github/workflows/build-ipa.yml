@@ -220,21 +220,14 @@ jobs:
           ENGINE_VERSION="${{ github.event.inputs.engine_override }}"
           if [ -z "$ENGINE_VERSION" ]; then
             echo "Deriving Nuvio Engine version from upstream composeApp/libs at tag $UPSTREAM_TAG..."
-            # Retry the lookup: a transient blip must NOT silently fall back to the pinned value,
-            # or we could ship a mismatched engine inside a green build.
-            # We use curl (NOT gh api) against the PUBLIC contents API: the upstream repo is public,
-            # anonymous GET returns the AAR list, and gh api inside CI kept failing for the cross-repo
-            # (upstream) contents call under the default GITHUB_TOKEN auth context -- a failure that
-            # 2>/dev/null previously swallowed, silently degrading to the pinned fallback.
-            AAR=""
-            for attempt in 1 2 3; do
-              AAR=$(curl -fsSL --retry 2 --max-time 60 \
-                      "https://api.github.com/repos/NuvioMedia/NuvioMobile/contents/composeApp/libs?ref=$UPSTREAM_TAG" \
-                    | grep -oE 'lib-nuvio-engine-android-[0-9]+\.[0-9]+\.[0-9]+\.aar' | head -n1 || true)
-              if [ -n "$AAR" ]; then break; fi
-              echo "  API lookup attempt $attempt returned no AAR; retrying in 5s..."
-              sleep 5
-            done
+            # The upstream tag is checked out to $GITHUB_WORKSPACE before this step, so the engine
+            # AAR is already on disk. Derive from the filesystem -- no API call, no network, no token.
+            # This is the only robust option: gh api (cross-repo contents) and curl against api.github.com
+            # both silently returned nothing in CI across multiple runs, which (hidden by 2>/dev/null)
+            # degraded every run to the pinned fallback. Reading the local file can't be rate-limited
+            # or auth-scoped away.
+            LIBS_DIR="$GITHUB_WORKSPACE/composeApp/libs"
+            AAR=$(ls "$LIBS_DIR" 2>/dev/null | grep -oE 'lib-nuvio-engine-android-[0-9]+\.[0-9]+\.[0-9]+\.aar' | head -n1 || true)
             if [ -n "$AAR" ]; then
               DERIVED=$(echo "$AAR" | sed -E 's/^lib-nuvio-engine-android-(.+)\.aar$/v\1/')
               if [[ "$DERIVED" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
