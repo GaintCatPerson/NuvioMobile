@@ -220,24 +220,33 @@ jobs:
           ENGINE_VERSION="${{ github.event.inputs.engine_override }}"
           if [ -z "$ENGINE_VERSION" ]; then
             echo "Deriving Nuvio Engine version from upstream composeApp/libs at tag $UPSTREAM_TAG..."
-            AAR=$(gh api "repos/NuvioMedia/NuvioMobile/contents/composeApp/libs?ref=$UPSTREAM_TAG" \
-                    --jq '.[] | select(.name | test("lib-nuvio-engine-android-.*\\.aar")) | .name' 2>/dev/null \
-                  | head -n1 || true)
+            # Retry the API lookup: a transient gh/api hiccup must NOT silently fall back to the
+            # pinned version, or we could ship a mismatched engine inside a green build.
+            AAR=""
+            for attempt in 1 2 3; do
+              AAR=$(gh api "repos/NuvioMedia/NuvioMobile/contents/composeApp/libs?ref=$UPSTREAM_TAG" \
+                      --jq '.[] | select(.name | test("lib-nuvio-engine-android-.*\\.aar")) | .name' 2>/dev/null \
+                    | head -n1 || true)
+              if [ -n "$AAR" ]; then break; fi
+              echo "  API lookup attempt $attempt returned no AAR; retrying in 5s..."
+              sleep 5
+            done
             if [ -n "$AAR" ]; then
               DERIVED=$(echo "$AAR" | sed -E 's/^lib-nuvio-engine-android-(.+)\.aar$/v\1/')
               if [[ "$DERIVED" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
                 ENGINE_VERSION="$DERIVED"
                 echo "Derived engine version: $ENGINE_VERSION (from $AAR)"
               else
-                echo "WARNING: could not parse version from '$AAR'; using fallback."
+                echo "::warning::Could not parse engine version from '$AAR'; using fallback $NUVIO_ENGINE_VERSION_FALLBACK."
               fi
             else
-              echo "WARNING: no bundled engine AAR found at tag $UPSTREAM_TAG; using fallback."
+              echo "::warning::No bundled engine AAR found at tag $UPSTREAM_TAG (or API unreachable after 3 retries); using fallback $NUVIO_ENGINE_VERSION_FALLBACK."
             fi
           fi
           if [ -z "$ENGINE_VERSION" ]; then
             ENGINE_VERSION="$NUVIO_ENGINE_VERSION_FALLBACK"
             echo "Using fallback engine version: $ENGINE_VERSION"
+            echo "::warning::Engine version resolved via FALLBACK ($ENGINE_VERSION), not auto-derived from the tag. Confirm this is intended before trusting the build."
           fi
           echo "NUVIO_ENGINE_VERSION=$ENGINE_VERSION" >> "$GITHUB_ENV"
 
