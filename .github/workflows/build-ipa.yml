@@ -222,11 +222,14 @@ jobs:
             echo "Deriving Nuvio Engine version from upstream composeApp/libs at tag $UPSTREAM_TAG..."
             # Retry the API lookup: a transient gh/api hiccup must NOT silently fall back to the
             # pinned version, or we could ship a mismatched engine inside a green build.
+            # NOTE: we intentionally use --jq '.[].name' (no regex) and match with grep -E below.
+            # Embedding the regex in jq's --jq string triggered an invalid-escape parse error under
+            # the real CI gojq, which (hidden by 2>/dev/null) silently fell back to the pinned value.
             AAR=""
             for attempt in 1 2 3; do
               AAR=$(gh api "repos/NuvioMedia/NuvioMobile/contents/composeApp/libs?ref=$UPSTREAM_TAG" \
-                      --jq '.[] | select(.name | test("lib-nuvio-engine-android-.*\\.aar")) | .name' 2>/dev/null \
-                    | head -n1 || true)
+                      --jq '.[].name' 2>/dev/null \
+                    | grep -E '^lib-nuvio-engine-android-.*\.aar$' | head -n1 || true)
               if [ -n "$AAR" ]; then break; fi
               echo "  API lookup attempt $attempt returned no AAR; retrying in 5s..."
               sleep 5
